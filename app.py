@@ -119,15 +119,16 @@ def tx_lines(transcript):
     return out
 
 def decisive_lines(inc):
-    """Distractor sentences repeat many times; the real evidence lines are unique or name this service/dependency."""
-    rows = tx_lines(inc["transcript"])
-    cnt = {}
-    for _, _, k in rows: cnt[k] = cnt.get(k, 0) + 1
+    """Real evidence = labelled lines (on-call finding / bounded observation / ...) that name this service or its dependency."""
     svc = inc.get("service") or ""
     keep = []
-    for i, ln, k in rows:
-        if cnt[k] == 1 or (svc and svc in ln) or re.search(r"\bdep_[A-Za-z0-9]+", ln):
-            keep.append((i, ln))
+    for ln in inc["transcript"].splitlines():
+        m = re.match(r"\s*\[([^\]\s]+)\]\s*(?:\d{4}-\d\d-\d\dT\S+Z)?\s*(.*)$", ln)
+        if not m: continue
+        body = m.group(2)
+        if not LABEL.match(body): continue
+        if (svc and svc in body) or re.search(r"\bdep_[A-Za-z0-9]+", body):
+            keep.append((m.group(1), ln.strip()))
     return keep
 
 def ev_ids(transcript):
@@ -274,7 +275,7 @@ async def make_plan(b):
             except Exception as e2:
                 print("PLAN gemini fail", type(e2).__name__, str(e2)[:80], flush=True)
     print(f"PLAN model={model} ok={raw is not None} {time.monotonic()-tstart:.1f}s", flush=True)
-    plan = repair_plan(b, raw, [i for i, _ in cands] if 2 <= len(cands) <= 10 else None)
+    plan = repair_plan(b, raw, [i for i, _ in cands] if 1 <= len(cands) <= 10 else None)
     return plan, model, t0, time.time_ns()
 
 # ---------------- state machine ----------------
