@@ -119,17 +119,22 @@ def tx_lines(transcript):
     return out
 
 def decisive_lines(inc):
-    """Real evidence = labelled lines (on-call finding / bounded observation / ...) that name this service or its dependency."""
+    """Real evidence = labelled incident-window lines whose sentence is NOT one of the stock distractor sentences."""
     svc = inc.get("service") or ""
-    keep = []
+    rows = []
     for ln in inc["transcript"].splitlines():
         m = re.match(r"\s*\[([^\]\s]+)\]\s*(?:\d{4}-\d\d-\d\dT\S+Z)?\s*(.*)$", ln)
         if not m: continue
         body = m.group(2)
-        if not LABEL.match(body): continue
-        if (svc and svc in body) or re.search(r"\bdep_[A-Za-z0-9]+", body):
-            keep.append((m.group(1), ln.strip()))
-    return keep
+        lab = bool(LABEL.match(body))
+        core = LABEL.sub("", body).strip()[:40].lower()
+        rows.append((m.group(1), ln.strip(), lab, core, body))
+    stock = {r[3] for r in rows if not r[2]}
+    cnt = {}
+    for r in rows: cnt[r[3]] = cnt.get(r[3], 0) + 1
+    keep = [(r[0], r[1], r[4]) for r in rows if r[2] and r[3] not in stock and cnt[r[3]] == 1]
+    keep.sort(key=lambda t: 0 if ((svc and svc in t[2]) or re.search(r"\bdep_[A-Za-z0-9]+", t[2])) else 1)
+    return [(i, l) for i, l, _ in keep]
 
 def ev_ids(transcript):
     return [m.group(1) for m in (re.match(r"\s*\[([^\]\s]+)\]", ln) for ln in transcript.splitlines()) if m]
@@ -212,7 +217,7 @@ def repair_plan(b, raw, cand_ids=None):
         else:
             pick = [e for e in ev if e in cand_ids]
             ev = (pick + [c for c in cand_ids if c not in pick])[:4]
-    if len(ev) < 2:                                    # fall back to lines that mention the root cause words
+    if len(ev) < 2 and not cand_ids:                   # fall back to lines that mention the root cause words
         words = [w for w in re.findall(r"[a-z]{4,}", rc.lower().replace("_", " "))]
         scored = sorted(ids, key=lambda i: -sum(w in " ".join(l for l in inc["transcript"].splitlines() if l.strip().startswith(f"[{i}]")).lower() for w in words))
         for i in scored:
@@ -275,7 +280,7 @@ async def make_plan(b):
             except Exception as e2:
                 print("PLAN gemini fail", type(e2).__name__, str(e2)[:80], flush=True)
     print(f"PLAN model={model} ok={raw is not None} {time.monotonic()-tstart:.1f}s", flush=True)
-    plan = repair_plan(b, raw, [i for i, _ in cands] if 1 <= len(cands) <= 10 else None)
+    plan = repair_plan(b, raw, [i for i, _ in cands][:4] if 1 <= len(cands) <= 10 else None)
     return plan, model, t0, time.time_ns()
 
 # ---------------- state machine ----------------
