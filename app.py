@@ -144,6 +144,17 @@ def cause_kind(rc):
         if any(w in t for w in kws): return k
     return None
 
+def norm_enums(schema, args):
+    props = (schema or {}).get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict): return args
+    nz = lambda x: re.sub(r"[^a-z0-9]", "", str(x).lower())
+    for k, v in list(args.items()):
+        en = (props.get(k) or {}).get("enum")
+        if en and v not in en:
+            m = [e for e in en if nz(e) == nz(v)]
+            if m: args[k] = m[0]
+    return args
+
 def diag_specs(kind, service, dep):
     W = 30
     return {
@@ -188,8 +199,13 @@ def repair_plan(b, raw):
         if name not in tools: continue
         sch = tools[name].get("inputSchema")
         props = sch.get("properties") if isinstance(sch, dict) else None
-        if isinstance(props, dict): args = {k: v for k, v in args.items() if k in props}
-        args = fill_args(sch, args, inc)
+        if isinstance(props, dict):
+            known = {"service": service, "windowMinutes": 30}
+            if name not in ("inspect_deployment", "dependency_status"):
+                for k, v in known.items():
+                    if k in props and k not in args: args = {**args, k: v}
+            args = {k: v for k, v in args.items() if k in props}
+        args = norm_enums(sch, fill_args(sch, args, inc))
         diags.append({"toolName": name, "arguments": args, "evidence": ev[:2]})
     diags = diags[:pol.get("maximumDiagnostics", 3)]
     if not diags:                                      # unknown root-cause family: let the first non-effect tool run
@@ -391,7 +407,8 @@ def waiting_view(state, only_new):
     ap = state["approval"]
     if ap and not ap["done"]:
         apps = [{"approvalId": ap["approvalId"], "actionId": ap["actionId"], "toolName": ap["toolName"], "argumentsDigest": ap["argumentsDigest"]}]
-    return {"runId": state["runId"], "status": "waiting", "diagnosis": state["diagnosis"], "dispatches": disp, "approvals": apps}
+    return {"runId": state["runId"], "status": "waiting", "diagnosis": state["diagnosis"], "dispatches": disp, "approvals": apps,
+            "actionLog": state["actionLog"], "receiptLog": state["receiptLog"]}
 
 def current_view(state, only_new=False):
     return state["final"] if state["final"] else waiting_view(state, only_new)
@@ -494,7 +511,7 @@ async def create_run(request: Request):
         row = load(run_id)
         if row:
             if row[0] != h: return err(409, "runId already used with different content")
-            return Response(content=row[1], media_type="application/json")
+            return Response(content=row[3], media_type="application/json")
         plan, model, tm0, tm1 = await make_plan(b)
         st = initial_state(b, plan, model, tm0, tm1, request.headers.get("traceparent"), request.headers.get("tracestate"))
         text = render(st, waiting_view(st, True))
@@ -502,8 +519,17 @@ async def create_run(request: Request):
         with dblock:
             db.execute("INSERT INTO runs VALUES(?,?,?,?,?)", (run_id, h, text, json.dumps(st), text))
             db.commit()
-        print("RUN_CREATED", run_id[:12], plan["rootCause"], [d["toolName"] for d in plan["diagnostics"]], plan["effect"]["toolName"],
-              "approval" if st["needs_approval"] else "", flush=True)
+        print("RUN_CREATED", run_id[:12], "svc", b["incident"].get("service"), "| cause", plan["rootCause"], "| allowed", b["incident"]["allowedRootCauses"],
+              "| diag", [(d["toolName"], d["arguments"]) for d in plan["diagnostics"]], "| effect", plan["effect"]["toolName"], plan["effect"]["arguments"],
+              "| approval" if st["needs_approval"] else "", "| effectTools", b["policy"].get("effectTools"), "| catalog", [t["name"] for t in b["toolCatalog"]], flush=True)
+        for d in plan["diagnostics"]:
+            t = next((x for x in b["toolCatalog"] if x["name"] == d["toolName"]), {})
+            print("  SCHEMA", d["toolName"], json.dumps(t.get("inputSchema"))[:400], flush=True)
+        if cause_kind(plan["rootCause"]) in ("cert", "secret"):
+            for ln in b["incident"]["transcript"].splitlines()[:70]: print("  TX", ln[:200], flush=True)
+        tl = {m.group(1): ln for ln in b["incident"]["transcript"].splitlines() for m in [re.match(r"\s*\[([^\]\s]+)\]", ln)] if m}
+        for e in plan["evidence"]: print("  EVID", e, (tl.get(e) or "")[:170], flush=True)
+        print("  TRANSCRIPT lines", len(tl), "sample:", [ln[:90] for ln in list(tl.values())[:3]], flush=True)
         return Response(content=text, media_type="application/json")
 
 async def post_receipt(run_id: str, request: Request):
