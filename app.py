@@ -150,7 +150,10 @@ def fill_args(schema, args, inc):
     """keep only declared properties; fill missing required ones with something plausible"""
     props = (schema or {}).get("properties") if isinstance(schema, dict) else None
     args = dict(args) if isinstance(args, dict) else {}
-    if not isinstance(props, dict): return args
+    if not isinstance(props, dict):
+        for k in ((schema or {}).get("required") or [] if isinstance(schema, dict) else []):
+            if k not in args and re.search(r"service", k, re.I): args[k] = inc.get("service")
+        return args
     args = {k: v for k, v in args.items() if k in props}
     for k in (schema.get("required") or []):
         if k in args: continue
@@ -176,7 +179,10 @@ def cause_kind(rc):
 
 def norm_enums(schema, args):
     props = (schema or {}).get("properties") if isinstance(schema, dict) else None
-    if not isinstance(props, dict): return args
+    if not isinstance(props, dict):
+        for k in ((schema or {}).get("required") or [] if isinstance(schema, dict) else []):
+            if k not in args and re.search(r"service", k, re.I): args[k] = inc.get("service")
+        return args
     nz = lambda x: re.sub(r"[^a-z0-9]", "", str(x).lower())
     for k, v in list(args.items()):
         en = (props.get(k) or {}).get("enum")
@@ -191,11 +197,11 @@ def diag_specs(kind, service, dep):
         "deploy": [("inspect_deployment", {"service": service}), ("query_metrics", {"service": service, "metric": "error_rate", "windowMinutes": W})],
         "db": [("query_metrics", {"service": service, "metric": "db_pool_wait", "windowMinutes": W}),
                ("query_logs", {"service": service, "query": "pool acquisition timeout", "windowMinutes": W})],
-        "cert": [("dependency_status", {"dependency": dep}), ("read_runbook", {"topic": "tls-expiry"})],
+        "cert": [("dependency_status", {"dependency": dep}), ("read_runbook", {"service": service, "topic": "tls-expiry"})],
         "flag": [("query_logs", {"service": service, "query": "evaluation depth exceeded", "windowMinutes": W}),
                  ("inspect_deployment", {"service": service})],
         "traffic": [("query_metrics", {"service": service, "metric": "request_saturation", "windowMinutes": W})],
-        "secret": [("read_runbook", {"topic": "secret-rotation"})],
+        "secret": [("read_runbook", {"service": service, "topic": "secret-rotation"})],
     }.get(kind, [])
 
 def repair_plan(b, raw, cand_ids=None):
