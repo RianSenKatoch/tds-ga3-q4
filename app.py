@@ -106,6 +106,30 @@ Do this:
 Reply ONLY JSON:
 {"rootCause":"","evidence":["ev_..."],"dependency":"","effect":{"toolName":"","arguments":{}}}"""
 
+LABEL = re.compile(r"^(?:correlated sample|bounded observation|incident-window record|on-call finding)\s*:\s*", re.I)
+
+def tx_lines(transcript):
+    """-> list of (id, full_line, key). key = first 60 chars of the sentence without timestamp/label."""
+    out = []
+    for ln in transcript.splitlines():
+        m = re.match(r"\s*\[([^\]\s]+)\]\s*(?:\d{4}-\d\d-\d\dT\S+Z)?\s*(.*)$", ln)
+        if not m: continue
+        core = LABEL.sub("", m.group(2)).strip()
+        out.append((m.group(1), ln.strip(), core[:60].lower()))
+    return out
+
+def decisive_lines(inc):
+    """Distractor sentences repeat many times; the real evidence lines are unique or name this service/dependency."""
+    rows = tx_lines(inc["transcript"])
+    cnt = {}
+    for _, _, k in rows: cnt[k] = cnt.get(k, 0) + 1
+    svc = inc.get("service") or ""
+    keep = []
+    for i, ln, k in rows:
+        if cnt[k] == 1 or (svc and svc in ln) or re.search(r"\bdep_[A-Za-z0-9]+", ln):
+            keep.append((i, ln))
+    return keep
+
 def ev_ids(transcript):
     return [m.group(1) for m in (re.match(r"\s*\[([^\]\s]+)\]", ln) for ln in transcript.splitlines()) if m]
 
@@ -168,7 +192,7 @@ def diag_specs(kind, service, dep):
         "secret": [("read_runbook", {"topic": "secret-rotation"})],
     }.get(kind, [])
 
-def repair_plan(b, raw):
+def repair_plan(b, raw, cand_ids=None):
     inc, pol = b["incident"], b["policy"]
     ids = ev_ids(inc["transcript"]); idset = set(ids)
     tools = {t["name"]: t for t in b["toolCatalog"]}
@@ -182,6 +206,11 @@ def repair_plan(b, raw):
     for e in (raw.get("evidence") or []):
         e = str(e).strip().strip("[]")
         if e in idset and e not in ev: ev.append(e)
+    if cand_ids:                                       # code-side filtering: the unique, incident-specific lines are the evidence
+        if len(cand_ids) <= 4: ev = list(cand_ids)
+        else:
+            pick = [e for e in ev if e in cand_ids]
+            ev = (pick + [c for c in cand_ids if c not in pick])[:4]
     if len(ev) < 2:                                    # fall back to lines that mention the root cause words
         words = [w for w in re.findall(r"[a-z]{4,}", rc.lower().replace("_", " "))]
         scored = sorted(ids, key=lambda i: -sum(w in " ".join(l for l in inc["transcript"].splitlines() if l.strip().startswith(f"[{i}]")).lower() for w in words))
@@ -223,7 +252,12 @@ def repair_plan(b, raw):
 async def make_plan(b):
     """exactly ONE model call per run. Returns (plan, model_name, t_start, t_end)."""
     t0 = time.time_ns()
-    user = plan_view(b)
+    cands = decisive_lines(b["incident"])
+    b2 = b
+    if 2 <= len(cands) <= 10:
+        b2 = {**b, "incident": {**b["incident"], "transcript": "\n".join(l for _, l in cands)}}
+    print("CANDIDATES", len(cands), [l[:110] for _, l in cands][:6], flush=True)
+    user = plan_view(b2)
     raw, model = None, AIPIPE_MODEL if AIPIPE_TOKEN else GEM_MODEL
     tstart = time.monotonic()
     try:
@@ -240,7 +274,7 @@ async def make_plan(b):
             except Exception as e2:
                 print("PLAN gemini fail", type(e2).__name__, str(e2)[:80], flush=True)
     print(f"PLAN model={model} ok={raw is not None} {time.monotonic()-tstart:.1f}s", flush=True)
-    plan = repair_plan(b, raw)
+    plan = repair_plan(b, raw, [i for i, _ in cands] if 2 <= len(cands) <= 10 else None)
     return plan, model, t0, time.time_ns()
 
 # ---------------- state machine ----------------
@@ -522,11 +556,11 @@ async def create_run(request: Request):
         print("RUN_CREATED", run_id[:12], "svc", b["incident"].get("service"), "| cause", plan["rootCause"], "| allowed", b["incident"]["allowedRootCauses"],
               "| diag", [(d["toolName"], d["arguments"]) for d in plan["diagnostics"]], "| effect", plan["effect"]["toolName"], plan["effect"]["arguments"],
               "| approval" if st["needs_approval"] else "", "| effectTools", b["policy"].get("effectTools"), "| catalog", [t["name"] for t in b["toolCatalog"]], flush=True)
+        et = next((x for x in b["toolCatalog"] if x["name"] == plan["effect"]["toolName"]), {})
+        print("  EFFECT_SCHEMA", plan["effect"]["toolName"], json.dumps(et.get("inputSchema"))[:400], flush=True)
         for d in plan["diagnostics"]:
             t = next((x for x in b["toolCatalog"] if x["name"] == d["toolName"]), {})
             print("  SCHEMA", d["toolName"], json.dumps(t.get("inputSchema"))[:400], flush=True)
-        if cause_kind(plan["rootCause"]) in ("cert", "secret"):
-            for ln in b["incident"]["transcript"].splitlines()[:70]: print("  TX", ln[:200], flush=True)
         tl = {m.group(1): ln for ln in b["incident"]["transcript"].splitlines() for m in [re.match(r"\s*\[([^\]\s]+)\]", ln)] if m}
         for e in plan["evidence"]: print("  EVID", e, (tl.get(e) or "")[:170], flush=True)
         print("  TRANSCRIPT lines", len(tl), "sample:", [ln[:90] for ln in list(tl.values())[:3]], flush=True)
