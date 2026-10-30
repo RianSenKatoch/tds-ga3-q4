@@ -276,6 +276,8 @@ def repair_plan(b, raw, cand_ids=None):
     if en == "scale_service" and scale_n is not None:
         for k in list(ea):
             if re.search(r"replica", k, re.I): ea[k] = scale_n
+    if en in ("open_incident", "page_owner") and "service" in ea and inc.get("service"):
+        ea["service"] = inc["service"]
     if en == "open_incident":
         print("EFFECT_OPEN_INCIDENT", ea, flush=True)
     return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": {"toolName": en, "arguments": ea, "evidence": ev[:2]}}
