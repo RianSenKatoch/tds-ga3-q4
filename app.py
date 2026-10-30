@@ -276,6 +276,21 @@ def repair_plan(b, raw, cand_ids=None):
     if en == "scale_service" and scale_n is not None:
         for k in list(ea):
             if re.search(r"replica", k, re.I): ea[k] = scale_n
+    if en == "rollback_deployment":
+        evr = " ".join(l for l in inc["transcript"].splitlines() if any(l.strip().startswith(f"[{i}]") for i in ev))
+        RID = r"(r\d+-[A-Za-z0-9]+)"
+        good = None
+        for pat in (r"holdback(?:\s+(?:still\s+)?(?:running|on|at))?\s+" + RID, r"(?:previous|prior|earlier|last[- ]known[- ]good|stable)\s+(?:release|version|build)\s+" + RID,
+                    r"roll(?:ing)?\s*back to\s+" + RID, r"(?:revert|reversion) to\s+" + RID):
+            m = re.search(pat, evr, re.I)
+            if m: good = m.group(1); break
+        if good is None:
+            ids = list(dict.fromkeys(re.findall(r"\b" + RID + r"\b", evr)))
+            bad = re.search(r"(?:after|release|entered production|began)\s+" + RID, evr)
+            if len(ids) == 2 and bad and bad.group(1) in ids: good = [x for x in ids if x != bad.group(1)][0]
+        if good and "release" in ea:
+            ea["release"] = good
+        print("ROLLBACK_TARGET", good, ea, flush=True)
     if en in ("open_incident", "page_owner") and "service" in ea and inc.get("service"):
         ea["service"] = inc["service"]
     if en == "open_incident":
