@@ -262,8 +262,20 @@ def repair_plan(b, raw, cand_ids=None):
     if kind == "cert" and "open_incident" in effects:
         evt = " ".join(l for l in inc["transcript"].splitlines() if any(l.strip().startswith(f"[{i}]") for i in ev)).lower()
         if re.search(r"(linked|link)[^.]{0,40}(severity[- ]one|sev-?1)[^.]{0,20}incident|(severity[- ]one|sev-?1) incident", evt): en = "open_incident"
+    scale_n = None
+    if kind in ("db", "traffic") and "scale_service" in effects:
+        evt2 = " ".join(l for l in inc["transcript"].splitlines() if any(l.strip().startswith(f"[{i}]") for i in ev)).lower()
+        hit = re.search(r"(already|currently|now)\b[^.]{0,60}\b(at|reached|hit|running at)\b[^.]{0,40}\b(maximum|max|limit|ceiling|cap)\b|\b(maximum|permitted|max)\b[^.]{0,30}\b(replicas?|scaling|capacity)\b[^.]{0,40}\b(reached|already|exhausted)\b|cannot (?:be )?scal|no (?:further |more )?(?:scaling )?headroom", evt2)
+        if hit and "page_owner" in effects: en = "page_owner"
+        else:
+            en = "scale_service"
+            m = re.search(r"exactly (\d+)\s+(?:application\s+)?replicas|(?:ceiling|target|limit)[^.;]{0,60}?(\d+)\s+(?:application\s+)?replicas", evt2)
+            if m: scale_n = int(m.group(1) or m.group(2))
     if en is None: en = want if want in effects else (effects[0] if effects else None)
     ea = fill_args(tools[en].get("inputSchema"), eff.get("arguments") if eff.get("toolName") == en else {}, inc) if en else {}
+    if en == "scale_service" and scale_n is not None:
+        for k in list(ea):
+            if re.search(r"replica", k, re.I): ea[k] = scale_n
     if en == "open_incident":
         print("EFFECT_OPEN_INCIDENT", ea, flush=True)
     return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": {"toolName": en, "arguments": ea, "evidence": ev[:2]}}
