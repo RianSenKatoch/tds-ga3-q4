@@ -102,7 +102,7 @@ Do this:
 1. rootCause: choose exactly ONE value from allowedRootCauses (copy it exactly).
 2. evidence: 2 to 4 distinct evidence IDs (copy exactly from the transcript, without brackets) of the lines that show the root cause.
 3. dependency: if the root cause involves a dependency (for example an expired certificate), the dependency id exactly as written in the transcript; otherwise "".
-4. effect: choose exactly ONE tool from policy.effectTools that fixes the root cause, with exact arguments from the transcript (inputSchema properties only). Guidance: deployment regression -> rollback_deployment of the deployment the evidence blames; feature flag recursion -> disable_feature of the flag the evidence blames; secret rotation mismatch or expired certificate -> page_owner; database connection exhaustion or traffic capacity exhaustion -> scale_service, BUT if the service is already at its permitted scaling limit (maximum replicas/capacity reached) do NOT scale: page_owner instead. Never invent targets; copy ids exactly.
+4. effect: choose exactly ONE tool from policy.effectTools that fixes the root cause, with exact arguments from the transcript (inputSchema properties only). Guidance: deployment regression -> rollback_deployment of the deployment the evidence blames; feature flag recursion -> disable_feature of the flag the evidence blames; secret rotation mismatch -> page_owner; expired certificate -> page_owner, BUT if the evidence says the runbook requires a linked severity-one incident, use open_incident (severity SEV-1) instead; database connection exhaustion or traffic capacity exhaustion -> scale_service, BUT if the service is already at its permitted scaling limit (maximum replicas/capacity reached) do NOT scale: page_owner instead. Never invent targets; copy ids exactly.
 Reply ONLY JSON:
 {"rootCause":"","evidence":["ev_..."],"dependency":"","effect":{"toolName":"","arguments":{}}}"""
 
@@ -160,6 +160,8 @@ def fill_args(schema, args, inc):
         spec = props.get(k) or {}
         if "enum" in spec and spec["enum"]: args[k] = spec["enum"][0]
         elif re.search(r"service", k, re.I): args[k] = inc.get("service")
+        elif re.search(r"severity|sev", k, re.I): args[k] = "SEV-1"
+        elif re.search(r"title|summary|reason", k, re.I): args[k] = inc.get("title") or "incident"
         elif spec.get("type") == "integer": args[k] = 0
         else: args[k] = inc.get("service") or "unknown"
     for k, v in list(args.items()):
@@ -257,8 +259,13 @@ def repair_plan(b, raw, cand_ids=None):
     en = eff.get("toolName") if eff.get("toolName") in effects else None
     want = {"deploy": "rollback_deployment", "flag": "disable_feature", "secret": "page_owner"}.get(kind)
     if want in effects and want != "page_owner": en = want
+    if kind == "cert" and "open_incident" in effects:
+        evt = " ".join(l for l in inc["transcript"].splitlines() if any(l.strip().startswith(f"[{i}]") for i in ev)).lower()
+        if re.search(r"(linked|link)[^.]{0,40}(severity[- ]one|sev-?1)[^.]{0,20}incident|(severity[- ]one|sev-?1) incident", evt): en = "open_incident"
     if en is None: en = want if want in effects else (effects[0] if effects else None)
-    ea = fill_args(tools[en].get("inputSchema"), eff.get("arguments"), inc) if en else {}
+    ea = fill_args(tools[en].get("inputSchema"), eff.get("arguments") if eff.get("toolName") == en else {}, inc) if en else {}
+    if en == "open_incident":
+        print("EFFECT_OPEN_INCIDENT", ea, flush=True)
     return {"rootCause": rc, "evidence": ev, "diagnostics": diags, "effect": {"toolName": en, "arguments": ea, "evidence": ev[:2]}}
 
 async def make_plan(b):
@@ -268,7 +275,7 @@ async def make_plan(b):
     b2 = b
     if 2 <= len(cands) <= 10:
         b2 = {**b, "incident": {**b["incident"], "transcript": "\n".join(l for _, l in cands)}}
-    print("CANDIDATES", len(cands), [l[:110] for _, l in cands][:6], flush=True)
+    print("CANDIDATES", len(cands), [l[:400] for _, l in cands][:6], flush=True)
     user = plan_view(b2)
     raw, model = None, AIPIPE_MODEL if AIPIPE_TOKEN else GEM_MODEL
     tstart = time.monotonic()
